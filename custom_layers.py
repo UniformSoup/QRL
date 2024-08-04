@@ -32,7 +32,8 @@ class Circuit(layers.Layer):
             self.circuit += self.rotate(self.qubits, params[l])
 
         self.rotation_weights = self.add_weight(shape=(3 * self.num_qubits * self.num_layers,),
-                                     initializer=initializers.RandomNormal(mean=0, stddev=np.pi/2),
+                                     initializer=initializers.RandomUniform(minval=-np.pi/2.0, maxval=np.pi/2.0),
+                                     #initializer=initializers.RandomNormal(mean=0, stddev=np.pi/2),
                                      trainable=True, name="Rotation_Weights")
         
         self.input_weights = self.add_weight(shape=(self.num_qubits * self.num_layers,),
@@ -92,7 +93,7 @@ class Scale(layers.Layer):
     def build(self, input_shape):
         self.w = self.add_weight(shape=(input_shape[1],), initializer='ones',
                                  trainable=True)
-    tf.function
+    @tf.function
     def call(self, inputs):
         return tf.multiply(inputs, self.w)
         
