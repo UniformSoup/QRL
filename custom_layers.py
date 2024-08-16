@@ -20,28 +20,36 @@ class Circuit(layers.Layer):
         
         # Symbols for PQC weights
         params = sympy.symbols(f'param(0:{3 * self.num_layers * self.num_qubits})') # three rotations per layer per qubit
+        entangle_params = sympy.symbols(f'entangle(0:{self.num_layers})_(0:{self.num_qubits * (self.num_qubits - 1) // 2})')
         inputs = sympy.symbols(f'input(0:{self.num_layers})_(0:{self.num_qubits})')
         params = np.asarray(params).reshape((self.num_layers, self.num_qubits, 3))
+        entangle_params = np.asarray(entangle_params).reshape((self.num_layers, self.num_qubits * (self.num_qubits - 1) // 2))
         inputs = np.asarray(inputs).reshape((self.num_layers, self.num_qubits))
+        
 
         # Circuit Definition
         self.circuit = cirq.Circuit()
         for l in range(self.num_layers):
             self.circuit += self.encode(self.qubits, inputs[l])
-            self.circuit += self.entangle(self.qubits)
+            self.circuit += self.entangle(self.qubits, entangle_params[l])
             self.circuit += self.rotate(self.qubits, params[l])
 
         self.rotation_weights = self.add_weight(shape=(3 * self.num_qubits * self.num_layers,),
                                      initializer=initializers.RandomUniform(minval=-np.pi/2.0, maxval=np.pi/2.0),
                                      #initializer=initializers.RandomNormal(mean=0, stddev=np.pi/2),
                                      trainable=True, name="Rotation_Weights")
+
+        self.entangle_weights = self.add_weight(shape=(self.num_layers * self.num_qubits * (self.num_qubits - 1) // 2,),
+                                     initializer=initializers.RandomUniform(minval=-1, maxval=1),
+                                     #initializer=initializers.RandomNormal(mean=0, stddev=np.pi/2),
+                                     trainable=True, name="Entangle_Weights")
         
         self.input_weights = self.add_weight(shape=(self.num_qubits * self.num_layers,),
                                      initializer='ones', # expect inputs in range [-1,1]
                                      trainable=True, name="Input_Weights")
         
         # Symbol order
-        symbols = list(map(str, np.append(params.flatten(), inputs.flatten())))
+        symbols = list(map(str, np.concatenate([params.flatten(), entangle_params.flatten(), inputs.flatten()])))
         self.symbol_order = tf.constant([symbols.index(a) for a in sorted(symbols)])
         self.pqc = tfq.layers.ControlledPQC(self.circuit, [cirq.Z(q) for q in self.qubits])
         
@@ -56,19 +64,28 @@ class Circuit(layers.Layer):
         return cirq.Circuit([cirq.rx(params[i, 0])(q), cirq.ry(params[i, 1])(q), cirq.rz(params[i, 2])(q)] for i, q in enumerate(qubits))
 
     @staticmethod
-    def entangle(qubits):
+    def entangle(qubits, entangle_params):
         """Returns a layer entangling the qubits with CZ gates."""
-        return [cirq.CZ(q0, q1) for q0, q1 in zip(qubits, np.roll(qubits, -1, axis=0))]
+        entangle_gates = []
+        index = 0
+        
+        for i in range(len(qubits)):
+            for j in reversed(range(i + 1, len(qubits))):
+                entangle_gates.append(cirq.CZPowGate(exponent=entangle_params[index])(qubits[i], qubits[j]))
+                index += 1
+                
+        return entangle_gates
 
     @tf.function
     def call(self, inputs):
         batch_size = tf.gather(tf.shape(inputs), 0)
         tiled_params = tf.tile([self.rotation_weights], multiples=[batch_size, 1])
+        tiled_entangle_params = tf.tile([self.entangle_weights], multiples=[batch_size, 1])
         repeated_inputs = tf.repeat(inputs, repeats=self.num_layers, axis=1)
         weighted_inputs = tf.multiply(self.input_weights, repeated_inputs)
         tiled_weighted_inputs = tf.tile(weighted_inputs, multiples=[1, batch_size])
 
-        parameters = tf.concat([tiled_params, tiled_weighted_inputs], axis=1)
+        parameters = tf.concat([tiled_params, tiled_entangle_params, tiled_weighted_inputs], axis=1)
         parameters_ordered = tf.gather(
                         parameters,
                         self.symbol_order, axis=1)
@@ -84,6 +101,84 @@ class Circuit(layers.Layer):
             "num_layers": self.num_layers,
         })
         return config
+
+# @tf.keras.saving.register_keras_serializable()
+# class Circuit(layers.Layer):
+#     """Implements a parameterised quantum circuit with input re-uploading as a layer."""
+#     def __init__(self, num_layers, name="PQC", **kwargs):
+#         super().__init__(name=name, **kwargs)
+#         self.num_layers = num_layers
+
+#     def build(self, input_shape):
+#         self.num_qubits = input_shape[1]
+#         self.qubits = cirq.GridQubit.rect(1, self.num_qubits)
+        
+#         # Symbols for PQC weights
+#         params = sympy.symbols(f'param(0:{3 * self.num_layers * self.num_qubits})') # three rotations per layer per qubit
+#         inputs = sympy.symbols(f'input(0:{self.num_layers})_(0:{self.num_qubits})')
+#         params = np.asarray(params).reshape((self.num_layers, self.num_qubits, 3))
+#         inputs = np.asarray(inputs).reshape((self.num_layers, self.num_qubits))
+
+#         # Circuit Definition
+#         self.circuit = cirq.Circuit()
+#         for l in range(self.num_layers):
+#             self.circuit += self.encode(self.qubits, inputs[l])
+#             self.circuit += self.entangle(self.qubits)
+#             self.circuit += self.rotate(self.qubits, params[l])
+
+#         self.rotation_weights = self.add_weight(shape=(3 * self.num_qubits * self.num_layers,),
+#                                      initializer=initializers.RandomUniform(minval=-np.pi/2.0, maxval=np.pi/2.0),
+#                                      #initializer=initializers.RandomNormal(mean=0, stddev=np.pi/2),
+#                                      trainable=True, name="Rotation_Weights")
+        
+#         self.input_weights = self.add_weight(shape=(self.num_qubits * self.num_layers,),
+#                                      initializer='ones', # expect inputs in range [-1,1]
+#                                      trainable=True, name="Input_Weights")
+        
+#         # Symbol order
+#         symbols = list(map(str, np.append(params.flatten(), inputs.flatten())))
+#         self.symbol_order = tf.constant([symbols.index(a) for a in sorted(symbols)])
+#         self.pqc = tfq.layers.ControlledPQC(self.circuit, [cirq.Z(q) for q in self.qubits])
+        
+#     @staticmethod
+#     def encode(qubits, inputs):
+#         """Returns a layer encoding the state"""
+#         return cirq.Circuit(cirq.rx(inputs[i])(q) for i, q in enumerate(qubits))
+
+#     @staticmethod
+#     def rotate(qubits, params):
+#         """Returns a layer rotating each qubit."""
+#         return cirq.Circuit([cirq.rx(params[i, 0])(q), cirq.ry(params[i, 1])(q), cirq.rz(params[i, 2])(q)] for i, q in enumerate(qubits))
+
+#     @staticmethod
+#     def entangle(qubits):
+#         """Returns a layer entangling the qubits with CZ gates."""
+#         return [cirq.CNOT(q0, q1) for q0, q1 in zip(qubits, np.roll(qubits, -1, axis=0))]
+
+#     @tf.function
+#     def call(self, inputs):
+#         batch_size = tf.gather(tf.shape(inputs), 0)
+#         tiled_params = tf.tile([self.rotation_weights], multiples=[batch_size, 1])
+#         repeated_inputs = tf.repeat(inputs, repeats=self.num_layers, axis=1)
+#         weighted_inputs = tf.multiply(self.input_weights, repeated_inputs)
+#         tiled_weighted_inputs = tf.tile(weighted_inputs, multiples=[1, batch_size])
+
+#         parameters = tf.concat([tiled_params, tiled_weighted_inputs], axis=1)
+#         parameters_ordered = tf.gather(
+#                         parameters,
+#                         self.symbol_order, axis=1)
+        
+#         circuits = tf.repeat(tfq.convert_to_tensor([cirq.Circuit()]),
+#                         repeats=batch_size)
+        
+#         return self.pqc([circuits, parameters_ordered])
+
+#     def get_config(self):
+#         config = super().get_config()
+#         config.update({
+#             "num_layers": self.num_layers,
+#         })
+#         return config
 
 @tf.keras.saving.register_keras_serializable()
 class Scale(layers.Layer):
